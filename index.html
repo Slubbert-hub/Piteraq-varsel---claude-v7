@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Piteraq-varsel v7.1</title>
+<title>Piteraq-varsel v7.2</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:monospace;background:#000;color:#0f0;padding:12px;font-size:13px;line-height:1.8}
@@ -24,7 +24,7 @@ button:disabled{opacity:.35}
 </style>
 </head>
 <body>
-<h1>[ PITERAQ-VARSEL v7.1 / GRONLAND ]</h1>
+<h1>[ PITERAQ-VARSEL v7.2 / GRONLAND ]</h1>
 <p class="sub">IS-ladning · Gradient · Temperatur-reservoar · LP-kobling · Watch-flagg · inReach</p>
 <button id="btn" onclick="go()">▶ HENT PITERAQ-STATUS</button>
 <button id="kopier-btn" onclick="kopierInreach()">📋 KOPIER INREACH-MELDING ( &lt;160 tegn )</button>
@@ -298,7 +298,7 @@ function beregnFare(is_naa, is_24f, is_72f, isTemp_naa, isTemp_24f, lp_sentroid,
   // Dybde gir kun poeng hvis LP faktisk er i fareposisjons-sektoren
   var seaLowDepth = Math.max(0, IS_REF - lp_sentroid); // hPa under normalt
   var lpIFaresone = lav.curr && iLFaresone(lav.curr.lat, lav.curr.lon);
-  var dybdeKomp = lpIFaresone ? norm(seaLowDepth, 10, 50) : norm(seaLowDepth, 10, 50) * 0.3;
+  var dybdeKomp = lpIFaresone ? norm(seaLowDepth, 5, 25) : norm(seaLowDepth, 5, 25) * 0.3;
   var kobling = klamp(100 * (
     0.55 * (lav.sektorScore / 100)       // LP-sektor (Arm C best)
     + 0.30 * dybdeKomp                  // dybde, halvert utenfor fareposisjon
@@ -320,7 +320,7 @@ function beregnFare(is_naa, is_24f, is_72f, isTemp_naa, isTemp_24f, lp_sentroid,
   // Utløses selv i Regime B/C hvis reservoaret bygger
   var alignScore = alignNaa||0;
   var watch = (
-    reservoar >= 30 && kobling >= 50 &&
+    reservoar >= 25 && kobling >= 50 &&
     (grad >= GM || d6 >= 2 || (-lav.fordypning) >= 2 || gradAkkTimer >= 6 || alignScore >= 0.5)
   );
 
@@ -762,10 +762,10 @@ function vis(isData, soneData, gridData){
   o+='LP-sentroid  (DS)    '+lav.senterTrykk.toFixed(1).padStart(7)+' hPa  ('+lav.sentroidLat.toFixed(1)+'N/'+Math.abs(lav.sentroidLon).toFixed(1)+'V)'+NL;
   o+='LP-min-punkt (DS)    '+lav.minTrykk.toFixed(1).padStart(7)+' hPa  ('+lav.minLat.toFixed(1)+'N/'+Math.abs(lav.minLon).toFixed(1)+'V)'+NL;
 
-  o+=NL+'<span class="dim">v7.1 · IS: 3 punkt langs katabatisk strømbane, vektet 40/35/25%'+NL;
+  o+=NL+'<span class="dim">v7.2 · IS: 3 punkt langs katabatisk strømbane, vektet 40/35/25%'+NL;
   o+='Grid: '+GRID.length+' punkt · ArmA=Island/tralg · ArmB=Sentral DS · ArmC=Nær østkyst'+NL;
   o+='Terskler: GM='+GM+' GF='+GF+' GK='+GK+' hPa · Sentroid: N=5 laveste (1/P)'+NL;
-  o+='Watch: reservoar>=30+kobling>=50+trigger · Alignment: IS_mouth vind vs katabatisk ref 355°'+NL;
+  o+='Watch: reservoar>=25+kobling>=50+trigger · Dybde-norm kalibrert mot 27/04/2013'+NL;
   o+='Open-Meteo modelldata · IS: trykk+temp+vind · Grid: bare trykk</span>';
 
   out(o);
