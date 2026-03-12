@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Piteraq-varsel v7.0</title>
+<title>Piteraq-varsel v7.1</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:monospace;background:#000;color:#0f0;padding:12px;font-size:13px;line-height:1.8}
@@ -24,7 +24,7 @@ button:disabled{opacity:.35}
 </style>
 </head>
 <body>
-<h1>[ PITERAQ-VARSEL v7.0 / GRONLAND ]</h1>
+<h1>[ PITERAQ-VARSEL v7.1 / GRONLAND ]</h1>
 <p class="sub">IS-ladning · Gradient · Temperatur-reservoar · LP-kobling · Watch-flagg · inReach</p>
 <button id="btn" onclick="go()">▶ HENT PITERAQ-STATUS</button>
 <button id="kopier-btn" onclick="kopierInreach()">📋 KOPIER INREACH-MELDING ( &lt;160 tegn )</button>
@@ -49,19 +49,28 @@ var SONEPUNKTER = [
   {id:'TA', lat:65.6, lon:-37.6}    // Tasiilaq
 ];
 
-// LP-rutenett: Island-siden + nær østkysten
+// LP-rutenett: tre armer for aa fange LP-sentroid + tralg-akse
+// Arm A: Island og sørlig tralg-akse  55-63N / 13-21V
+// Arm B: Sentral Danmark-stredet      62-66N / 22-30V
+// Arm C: Nær østkysten                62-68N / 32-38V
 var GRID = (function(){
   var pts = [], idx = 0;
-  // Sone 1: Island og østre DS – 55-64N / 13-25V
-  [55,58,61,64].forEach(function(la){
-    [-13,-17,-21,-25].forEach(function(lo){
-      pts.push({lat:la, lon:lo, id:'G'+idx++});
+  // Arm A: Island/sørlig tralg (4x3=12)
+  [55,58,61,63].forEach(function(la){
+    [-13,-17,-21].forEach(function(lo){
+      pts.push({lat:la, lon:lo, id:'A'+idx++, arm:'A'});
     });
   });
-  // Sone 2: Nær østkysten – 55-63N / 28-34V
-  [55,59,63].forEach(function(la){
-    [-28,-31,-34].forEach(function(lo){
-      pts.push({lat:la, lon:lo, id:'G'+idx++});
+  // Arm B: Sentral DS (3x3=9)
+  [62,64,66].forEach(function(la){
+    [-22,-26,-30].forEach(function(lo){
+      pts.push({lat:la, lon:lo, id:'B'+idx++, arm:'B'});
+    });
+  });
+  // Arm C: Nær østkyst / høy fare-sone (3x3=9)
+  [62,65,68].forEach(function(la){
+    [-32,-35,-38].forEach(function(lo){
+      pts.push({lat:la, lon:lo, id:'C'+idx++, arm:'C'});
     });
   });
   return pts;
@@ -78,12 +87,15 @@ var IS_REF = 1013.25;
 // Baffin-forsterkning
 var BA_FORSTERKNING_TRSKEL = 5;
 
-// Sektorvekting LP (fra DMI-scriptet – W-sektorer driver piteraq best)
-var SEKTOR_SCORE = {
-  G16:90, G17:92, G18:88,  // ny sone 2 vestligste (nær kysten)
-  G19:78, G20:68, G21:50,
-  G22:50, G23:45, G24:35
-};
+// Sektorvekting LP basert paa arm og avstand til Tasiilaq
+// Arm C (nær østkyst 32-38V) er farligst – direkte utenfor Tasiilaq
+// Arm B (sentral DS 22-30V) er nest farligst
+// Arm A (Island/sør 13-21V) er lavest – langt unna
+function sektorVektForId(id, lat, lon){
+  if(id && id[0]==='C') return 85 + Math.max(0, (lat-62)*2);  // 85-97
+  if(id && id[0]==='B') return 60 + Math.max(0, (lat-62)*3);  // 60-72
+  return 30;  // Arm A
+}
 
 // ─── HJELPEFUNKSJONER ─────────────────────────────────────────────────────────
 
@@ -154,7 +166,8 @@ function sentroidVedIdx(gp, idx){
   });
   return {
     lat:wLat/wSum, lon:wLon/wSum, pressure:wP/wSum,
-    minP:minPt.p, minLat:minPt.lat, minLon:minPt.lon, minId:minPt.id
+    minP:minPt.p, minLat:minPt.lat, minLon:minPt.lon, minId:minPt.id,
+    minArm:minPt.arm||'?'
   };
 }
 
@@ -167,7 +180,7 @@ function sporLav(gp, times, now){
     spor.push({
       offset:off, lat:s.lat, lon:s.lon,
       pressure:s.pressure, minP:s.minP,
-      minLat:s.minLat, minLon:s.minLon, minId:s.minId,
+      minLat:s.minLat, minLon:s.minLon, minId:s.minId, minArm:s.minArm||'?',
       iLFare:iFare, dypNok:s.pressure <= LP_TRYKK_TRSKEL
     });
   }
@@ -196,7 +209,7 @@ function sporLav(gp, times, now){
   if(curr.lon < -37) exitAdvarsel='Sentroid nærmer seg VEST-grensen';
 
   // Sektorbasert kobling (fra DMI-scriptet)
-  var sektorScore = SEKTOR_SCORE[curr.minId] || 25;
+  var sektorScore = sektorVektForId(curr.minId, curr.minLat, curr.minLon);
 
   return {
     spor, curr, prev,
@@ -237,7 +250,7 @@ function gradAkkumulering(pIS_S, pIS_M, pIS_K, gp, times, now){
 // Regime B (IS<1013, LP>995):  reservoar-monitor kun
 // Regime C (IS<1013, LP<995):  watch kan fortsatt utløses
 
-function beregnFare(is_naa, is_24f, is_72f, isTemp_naa, isTemp_24f, lp_sentroid, ba_naa, lav, gradNaa, gradAksel, gradAkkTimer){
+function beregnFare(is_naa, is_24f, is_72f, isTemp_naa, isTemp_24f, lp_sentroid, ba_naa, lav, gradNaa, gradAksel, gradAkkTimer, alignNaa, alignTrend){
 
   var isHoyt  = is_naa > IS_REF;
   var lpAktiv = lp_sentroid < 995;
@@ -267,12 +280,14 @@ function beregnFare(is_naa, is_24f, is_72f, isTemp_naa, isTemp_24f, lp_sentroid,
   var tempTrendKomp = (isTempTrend24 !== null && isTempTrend24 < 0)
                       ? norm(-isTempTrend24, 0, 8) : 0;
 
+  var alignKomp = (alignNaa||0);  // 0-1, alignment styrker reservoaret
   var reservoar = klamp(100 * (
-    0.40 * norm(isAmp, -15, 15)          // IS-amplitude
+    0.35 * norm(isAmp, -15, 15)          // IS-amplitude
     + 0.20 * norm(isTrend24, -5, 10)     // IS-trend 24t
-    + 0.15 * norm(isTrend72, -8, 15)     // IS-trend 72t (langvarig bygning)
+    + 0.15 * norm(isTrend72, -8, 15)     // IS-trend 72t
     + 0.15 * tempKomp                    // kald luft på is
     + 0.10 * tempTrendKomp               // kjøling av is
+    + 0.05 * alignKomp                   // vind-alignment IS_mouth
   ), 0, 100);
 
   // Hvis IS langt under 1013 – cap reservoar (ingen ladning uansett trend)
@@ -300,9 +315,10 @@ function beregnFare(is_naa, is_24f, is_72f, isTemp_naa, isTemp_24f, lp_sentroid,
   // ── WATCH-FLAGG ───────────────────────────────────────────────────────────
   // "Våpenet er ladd og LP beveger seg riktig vei"
   // Utløses selv i Regime B/C hvis reservoaret bygger
+  var alignScore = alignNaa||0;
   var watch = (
     reservoar >= 30 && kobling >= 50 &&
-    (grad >= GM || d6 >= 2 || (-lav.fordypning) >= 2 || gradAkkTimer >= 6)
+    (grad >= GM || d6 >= 2 || (-lav.fordypning) >= 2 || gradAkkTimer >= 6 || alignScore >= 0.5)
   );
 
   // ── TOTAL FAREPOENG (kun Regime A) ───────────────────────────────────────
@@ -346,7 +362,8 @@ function beregnFare(is_naa, is_24f, is_72f, isTemp_naa, isTemp_24f, lp_sentroid,
               lav.fordypning < 0 ? 1.0 : lav.fordypning < 2 ? 0.8 : 0.6,
     lpLadVekt: lav.lpLadetid >= 36 ? 1.4 : lav.lpLadetid >= 18 ? 1.2 :
                lav.lpLadetid >= 6 ? 1.0 : 0.5,
-    regime, isHoyt, lpAktiv, regimeA, regimeC, seaLowDepth
+    regime, isHoyt, lpAktiv, regimeA, regimeC, seaLowDepth,
+    alignNaa: alignNaa||0, alignTrend: alignTrend||0, alignScore
   };
 }
 
@@ -384,8 +401,9 @@ async function go(){
     // Kall 1: IS-punkter (trykk + temperatur)
     var isLats=IS_PUNKTER.map(function(s){return s.lat;}).join(',');
     var isLons=IS_PUNKTER.map(function(s){return s.lon;}).join(',');
-    out('<span class="dim">Henter IS-punkter (3 punkt med temp)...</span>');
-    var res1=await fetch(base+'?latitude='+isLats+'&longitude='+isLons+pFelles);
+    out('<span class="dim">Henter IS-punkter (3 punkt med temp+vind)...</span>');
+    var pIS_full='&hourly=pressure_msl,temperature_2m,windspeed_10m,winddirection_10m&timezone=GMT&forecast_days=2&past_days=3';
+    var res1=await fetch(base+'?latitude='+isLats+'&longitude='+isLons+pIS_full);
     if(!res1.ok) throw new Error('IS HTTP '+res1.status);
     var r1=await res1.json();
     var isData=Array.isArray(r1)?r1:[r1];
@@ -434,6 +452,10 @@ function vis(isData, soneData, gridData){
   var tIS_K=isData[2].hourly.temperature_2m;
 
   // Soner
+  // Vinddata fra IS_mouth (indeks 2 = IS_K = mouth – nærmest kysten)
+  var wsIS  = isData[2].hourly.windspeed_10m;     // m/s
+  var wdIS  = isData[2].hourly.winddirection_10m; // grader
+
   var pIL=soneData[0].hourly.pressure_msl;
   var pBA=soneData[1].hourly.pressure_msl;
   var pTA=soneData[2].hourly.pressure_msl;
@@ -463,6 +485,30 @@ function vis(isData, soneData, gridData){
   var isTemp_naa = isTemp(ci);
   var isTemp_24f = isTemp(ci24);
 
+  // Vindalignment: katabatisk retning ved IS_mouth er ~nord (fra isen ned mot kysten)
+  // Typisk katabatisk retning: 0-45 grader (N til NØ)
+  // Geostrofisk/piteraq-alignment: vind dreier mot storskala fri-atmosfærisk strøm
+  // Signal: når IS-mouth-vinden er sterk OG peker mot kysten (N-NØ, 340-60 grader)
+  var wsNaa  = wsIS[ci];
+  var wdNaa  = wdIS[ci];
+  var wsM6   = wsIS[idxAt(times,now,-6)];
+  var wdM6   = wdIS[idxAt(times,now,-6)];
+
+  // Alignment-score: 1.0 = perfekt katabatisk+geostrofisk alignment
+  // Katabatisk retning ved mouth = ~350-360 (ned mot Tasiilaq, nesten nord)
+  // Vi måler avstand fra 355 grader (referanse-katabatisk retning)
+  function vindAlignment(deg, speed){
+    if(deg===null||speed===null) return 0;
+    var refDeg=355; // typisk katabatisk retning ved IS_mouth
+    var diff=Math.abs(((deg-refDeg)+540)%360-180); // minste vinkel-avstand
+    var retningScore=Math.max(0, 1-diff/90);       // 1=rett på, 0=90 grader av
+    var styrkeScore=Math.min(1, speed/20);          // 1=20m/s, 0=0
+    return retningScore * styrkeScore;
+  }
+  var alignNaa = vindAlignment(wdNaa, wsNaa);
+  var alignM6  = vindAlignment(wdM6,  wsM6);
+  var alignTrend = alignNaa - alignM6;  // positivt = alignment bygger
+
   var ba_naa = pBA[ci];
   var lav    = sporLav(gp, times, now);
   var lp_sentroid = lav.curr.pressure;
@@ -482,7 +528,8 @@ function vis(isData, soneData, gridData){
 
   // Fare
   var f=beregnFare(is_naa, is_24f, is_72f, isTemp_naa, isTemp_24f,
-                   lp_sentroid, ba_naa, lav, gradNaa, gradAksel, gradAkkTimer);
+                   lp_sentroid, ba_naa, lav, gradNaa, gradAksel, gradAkkTimer,
+                   alignNaa, alignTrend);
   var fi=fareNivaa(f);
 
   // inReach-melding
@@ -505,6 +552,7 @@ function vis(isData, soneData, gridData){
   o+='Reservoar:  <span class="'+(f.reservoar>=60?'hi':f.reservoar>=30?'mid':f.reservoar>=15?'blu':'ok')+'">'+f.reservoar.toFixed(0)+'/100</span>';
   o+='  Kobling: <span class="'+(f.kobling>=70?'hi':f.kobling>=50?'mid':f.kobling>=30?'blu':'ok')+'">'+f.kobling.toFixed(0)+'/100</span>'+NL;
   if(f.watch) o+='<span class="mid">⚠ WATCH: Reservoar+kobling aktiv – LP kan utlose</span>'+NL;
+  if(wsNaa!==null&&f.alignScore>=0.3) o+='Vindal:     <span class="'+(f.alignScore>=0.6?'hi':'mid')+'">'+Math.round(f.alignScore*100)+'% alignment @ IS-mouth  '+wsNaa.toFixed(0)+'m/s/'+Math.round(wdNaa)+'°</span>'+NL;
   o+='Farepoeng:  '+f.total.toFixed(0)+'/100';
   if(f.total>0) o+='  [grad:'+f.gradScore.toFixed(0)+' is:'+f.isScore.toFixed(0)+' lp:'+f.lpScore.toFixed(0)+' aksel:'+f.akScore.toFixed(0)+']';
   o+='</div></span>'+NL;
@@ -538,6 +586,17 @@ function vis(isData, soneData, gridData){
       var ttCls=f.isTempTrend24<-3?'hi':f.isTempTrend24<0?'mid':'ok';
       o+='IS-temp trend 24t: <span class="'+ttCls+'">'+(f.isTempTrend24>=0?'+':'')+f.isTempTrend24.toFixed(1)+'°C  ('+trendPil(f.isTempTrend24/6)+')</span>'+NL;
     }
+  }
+
+  // Vind-alignment
+  if(wsNaa!==null && wsNaa!==undefined){
+    var alignCls=f.alignScore>=0.6?'hi':f.alignScore>=0.3?'mid':f.alignScore>=0.1?'blu':'ok';
+    var alignPct=Math.round(f.alignScore*100);
+    o+='IS-mouth vind:     <span class="'+alignCls+'">'+wsNaa.toFixed(1)+' m/s  retning: '+Math.round(wdNaa)+'°';
+    o+='  alignment: '+alignPct+'%';
+    if(f.alignTrend>0.1) o+='  ↑ bygger';
+    else if(f.alignTrend<-0.1) o+='  ↓ avtar';
+    o+='</span>'+NL;
   }
 
   var baCls=f.baVekt>1?'mid':'dim';
@@ -700,10 +759,11 @@ function vis(isData, soneData, gridData){
   o+='LP-sentroid  (DS)    '+lav.senterTrykk.toFixed(1).padStart(7)+' hPa  ('+lav.sentroidLat.toFixed(1)+'N/'+Math.abs(lav.sentroidLon).toFixed(1)+'V)'+NL;
   o+='LP-min-punkt (DS)    '+lav.minTrykk.toFixed(1).padStart(7)+' hPa  ('+lav.minLat.toFixed(1)+'N/'+Math.abs(lav.minLon).toFixed(1)+'V)'+NL;
 
-  o+=NL+'<span class="dim">v7.0 · IS: 3 punkt (69N/42V, 68.6N/41V, 68.2N/40V) vektet 40/35/25%'+NL;
-  o+='Terskler: GM='+GM+' GF='+GF+' GK='+GK+' hPa · Grid: '+GRID.length+' punkt'+NL;
-  o+='Sentroid: N=5 laveste (1/P) · Watch: reservoar>=30 + kobling>=50 + triggeraktivitet'+NL;
-  o+='Open-Meteo modelldata · IS temp+trykk · Grid bare trykk</span>';
+  o+=NL+'<span class="dim">v7.1 · IS: 3 punkt langs katabatisk strømbane, vektet 40/35/25%'+NL;
+  o+='Grid: '+GRID.length+' punkt · ArmA=Island/tralg · ArmB=Sentral DS · ArmC=Nær østkyst'+NL;
+  o+='Terskler: GM='+GM+' GF='+GF+' GK='+GK+' hPa · Sentroid: N=5 laveste (1/P)'+NL;
+  o+='Watch: reservoar>=30+kobling>=50+trigger · Alignment: IS_mouth vind vs katabatisk ref 355°'+NL;
+  o+='Open-Meteo modelldata · IS: trykk+temp+vind · Grid: bare trykk</span>';
 
   out(o);
 }
@@ -738,7 +798,8 @@ function lagInreachMelding(f, lav, is_naa, gradNaa, gradAksel, isTemp_naa){
   var resStr='Res:'+f.reservoar.toFixed(0)+' Kob:'+f.kobling.toFixed(0);
 
   var linje1='PITERAQ '+dato+' '+fareStr;
-  var linje2='Reg:'+f.regime+' '+isStr+' '+tempStr;
+  var alignStr=f.alignScore>=0.3?'Al:'+Math.round(f.alignScore*100)+'%':'';
+  var linje2='Reg:'+f.regime+' '+isStr+' '+tempStr+' '+alignStr;
   var linje3=lpStr+' '+farePos+' '+gradStr+' '+akselStr;
   var linje4=resStr+' Fare:'+f.total+'/100';
 
