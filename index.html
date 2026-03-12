@@ -1,1 +1,767 @@
+<!DOCTYPE html>
+<html lang="no">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Piteraq-varsel v7.0</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:monospace;background:#000;color:#0f0;padding:12px;font-size:13px;line-height:1.8}
+h1{font-size:1rem;color:#0f0;margin-bottom:2px}
+.sub{color:#060;font-size:.72rem;margin-bottom:12px}
+button{background:#0f0;color:#000;border:none;padding:9px 0;font-family:monospace;font-size:13px;font-weight:bold;cursor:pointer;width:100%}
+button:disabled{opacity:.35}
+#kopier-btn{background:#000;color:#0f0;border:1px solid #0f0;padding:7px 0;font-family:monospace;font-size:12px;cursor:pointer;width:100%;margin-top:6px;display:none}
+#kopier-btn:active{background:#0f0;color:#000}
+#inreach-preview{font-size:11px;color:#060;margin-top:4px;white-space:pre-wrap;display:none;border-left:2px solid #030;padding-left:6px}
+#o{margin-top:12px;white-space:pre-wrap}
+.hi{color:#f00;font-weight:bold}
+.mid{color:#ff0;font-weight:bold}
+.ok{color:#00e000;font-weight:bold}
+.blu{color:#0cf;font-weight:bold}
+.dim{color:#060}
+.box{border:1px solid currentColor;padding:8px 10px;margin-bottom:10px;word-break:break-word;overflow-wrap:break-word}
+</style>
+</head>
+<body>
+<h1>[ PITERAQ-VARSEL v7.0 / GRONLAND ]</h1>
+<p class="sub">IS-ladning · Gradient · Temperatur-reservoar · LP-kobling · Watch-flagg · inReach</p>
+<button id="btn" onclick="go()">▶ HENT PITERAQ-STATUS</button>
+<button id="kopier-btn" onclick="kopierInreach()">📋 KOPIER INREACH-MELDING ( &lt;160 tegn )</button>
+<div id="inreach-preview"></div>
+<div id="o"></div>
+<script>
 
+// ─── KONFIGURASJON ────────────────────────────────────────────────────────────
+
+// Tre IS-punkter langs katabatisk strømbane fra indre is mot kysten
+// Vekting: source tyngst – der ladningen bygges
+var IS_PUNKTER = [
+  {id:'IS_S', lat:69.0, lon:-42.4, vekt:0.40},  // source – indre is
+  {id:'IS_M', lat:68.6, lon:-41.3, vekt:0.35},  // mid
+  {id:'IS_K', lat:68.2, lon:-40.3, vekt:0.25}   // mouth – nær kysten
+];
+
+// Referansepunkter
+var SONEPUNKTER = [
+  {id:'IL', lat:62.0, lon:-25.0},   // Island referanse
+  {id:'BA', lat:67.0, lon:-60.0},   // Baffin
+  {id:'TA', lat:65.6, lon:-37.6}    // Tasiilaq
+];
+
+// LP-rutenett: Island-siden + nær østkysten
+var GRID = (function(){
+  var pts = [], idx = 0;
+  // Sone 1: Island og østre DS – 55-64N / 13-25V
+  [55,58,61,64].forEach(function(la){
+    [-13,-17,-21,-25].forEach(function(lo){
+      pts.push({lat:la, lon:lo, id:'G'+idx++});
+    });
+  });
+  // Sone 2: Nær østkysten – 55-63N / 28-34V
+  [55,59,63].forEach(function(la){
+    [-28,-31,-34].forEach(function(lo){
+      pts.push({lat:la, lon:lo, id:'G'+idx++});
+    });
+  });
+  return pts;
+})();
+
+// LP fareposisjon: Danmark-stredet
+var LP_FARESONE = {latMin:62, latMax:68, lonMin:-38, lonMax:-18};
+var LP_TRYKK_TRSKEL = 992;
+
+// Gradientterskler IS_vektet → LP-sentroid
+var GK = 30, GF = 20, GM = 12;
+var IS_REF = 1013.25;
+
+// Baffin-forsterkning
+var BA_FORSTERKNING_TRSKEL = 5;
+
+// Sektorvekting LP (fra DMI-scriptet – W-sektorer driver piteraq best)
+var SEKTOR_SCORE = {
+  G16:90, G17:92, G18:88,  // ny sone 2 vestligste (nær kysten)
+  G19:78, G20:68, G21:50,
+  G22:50, G23:45, G24:35
+};
+
+// ─── HJELPEFUNKSJONER ─────────────────────────────────────────────────────────
+
+function idxAt(times, now, offHours){
+  var t = new Date(now.getTime() + offHours*3600000), b=0, bd=1e12;
+  for(var i=0; i<times.length; i++){
+    var d = Math.abs(new Date(times[i]+'Z') - t);
+    if(d<bd){bd=d; b=i;}
+  }
+  return b;
+}
+
+function trendPil(a){
+  if(a >  3) return '↑↑ Sterk stigning';
+  if(a >  1) return '↑  Stigende';
+  if(a > -1) return '→  Stabil';
+  if(a > -3) return '↓  Fallende';
+  return             '↓↓ Sterk nedgang';
+}
+
+function compassDir(deg){
+  var dirs=['N','NNO','NO','ONO','O','OSO','SO','SSO','S','SSV','SV','VSV','V','VNV','NV','NNV'];
+  return dirs[Math.round(((deg%360)+360)%360/22.5)%16];
+}
+
+function iLFaresone(lat, lon){
+  return lat>=LP_FARESONE.latMin && lat<=LP_FARESONE.latMax &&
+         lon>=LP_FARESONE.lonMin && lon<=LP_FARESONE.lonMax;
+}
+
+function klamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
+function norm(v, lo, hi){ return klamp((v-lo)/(hi-lo), 0, 1); }
+
+// ─── IS-TRYKK: vektet gjennomsnitt av tre punkter ────────────────────────────
+
+function isVektet(pIS_S, pIS_M, pIS_K, idx){
+  var vals = [pIS_S[idx], pIS_M[idx], pIS_K[idx]];
+  var vekter = [0.40, 0.35, 0.25];
+  var sum=0, wsum=0;
+  for(var i=0; i<3; i++){
+    if(vals[i]!==null && vals[i]!==undefined){
+      sum += vals[i]*vekter[i];
+      wsum += vekter[i];
+    }
+  }
+  return wsum>0 ? sum/wsum : null;
+}
+
+// ─── LAVTRYKK-ANALYSE ─────────────────────────────────────────────────────────
+
+var N_LAVESTE = 5;
+
+function sentroidVedIdx(gp, idx){
+  var pts=[];
+  for(var i=0; i<GRID.length; i++){
+    var p=gp[i][idx];
+    if(p===null||p===undefined) continue;
+    pts.push({lat:GRID[i].lat, lon:GRID[i].lon, id:GRID[i].id, p:p});
+  }
+  if(pts.length===0) return {lat:62,lon:-25,pressure:1013,minP:1013,minLat:62,minLon:-25,minId:'?'};
+  pts.sort(function(a,b){return a.p-b.p;});
+  var minPt=pts[0];
+  var top=pts.slice(0, Math.min(N_LAVESTE, pts.length));
+  var wSum=0, wLat=0, wLon=0, wP=0;
+  top.forEach(function(pt){
+    var w=1/pt.p;
+    wSum+=w; wLat+=w*pt.lat; wLon+=w*pt.lon; wP+=w*pt.p;
+  });
+  return {
+    lat:wLat/wSum, lon:wLon/wSum, pressure:wP/wSum,
+    minP:minPt.p, minLat:minPt.lat, minLon:minPt.lon, minId:minPt.id
+  };
+}
+
+function sporLav(gp, times, now){
+  var spor=[];
+  for(var off=-72; off<=0; off+=6){
+    var idx=idxAt(times, now, off);
+    var s=sentroidVedIdx(gp, idx);
+    var iFare=iLFaresone(s.lat, s.lon);
+    spor.push({
+      offset:off, lat:s.lat, lon:s.lon,
+      pressure:s.pressure, minP:s.minP,
+      minLat:s.minLat, minLon:s.minLon, minId:s.minId,
+      iLFare:iFare, dypNok:s.pressure <= LP_TRYKK_TRSKEL
+    });
+  }
+  var lpLadetid=0;
+  for(var k=spor.length-1; k>=0; k--){
+    if(spor[k].iLFare && spor[k].dypNok) lpLadetid+=6; else break;
+  }
+  lpLadetid = Math.min(72, lpLadetid);
+  var curr=spor[spor.length-1];
+  var prev=spor[spor.length-2];
+  var dLat=curr.lat-prev.lat;
+  var dLon=curr.lon-prev.lon;
+  var retning='Stasjonaer', naermerOst=false, retningVekt=0.5;
+  if(Math.abs(dLat)>0.05 || Math.abs(dLon)>0.05){
+    var deg=Math.atan2(dLon,dLat)*180/Math.PI;
+    retning=compassDir(deg);
+    naermerOst = dLon > 0;
+    var ostKomponent = dLon / (Math.sqrt(dLat*dLat + dLon*dLon) + 0.001);
+    retningVekt = 0.5 + 0.5 * ostKomponent;
+  }
+  var fordypning=curr.pressure - prev.pressure;
+  var exitAdvarsel=null;
+  if(curr.lat < 57)  exitAdvarsel='Sentroid nærmer seg SOR-grensen';
+  if(curr.lat > 64)  exitAdvarsel='Sentroid nærmer seg NORD-grensen';
+  if(curr.lon > -15) exitAdvarsel='Sentroid nærmer seg OST-grensen';
+  if(curr.lon < -37) exitAdvarsel='Sentroid nærmer seg VEST-grensen';
+
+  // Sektorbasert kobling (fra DMI-scriptet)
+  var sektorScore = SEKTOR_SCORE[curr.minId] || 25;
+
+  return {
+    spor, curr, prev,
+    retning, naermerOst, retningVekt,
+    fordypning,
+    senterTrykk:curr.pressure, minTrykk:curr.minP,
+    minLat:curr.minLat, minLon:curr.minLon, minId:curr.minId,
+    sentroidLat:curr.lat, sentroidLon:curr.lon,
+    lpLadetid, exitAdvarsel, sektorScore
+  };
+}
+
+// ─── GRADIENTAKKUMULERING ─────────────────────────────────────────────────────
+
+function gradAkkumulering(pIS_S, pIS_M, pIS_K, gp, times, now){
+  var timer=0;
+  for(var off=0; off<=72; off+=6){
+    var idx=idxAt(times, now, -off);
+    var s=sentroidVedIdx(gp, idx);
+    var is_v=isVektet(pIS_S, pIS_M, pIS_K, idx);
+    var grad=is_v - s.pressure;
+    if(grad >= GM) timer+=6; else break;
+  }
+  return timer;
+}
+
+// ─── FAREMODELL v7.0 ──────────────────────────────────────────────────────────
+//
+// Tre score-dimensjoner (inspirert av DMI-scriptet):
+//   RESERVOAR (0-100): IS-ladning over tid + temperatur-støtte
+//   KOBLING    (0-100): LP i riktig sektor, dypt nok, bevegelse riktig vei
+//   TRIGGER    (0-100): aktiv gradient + akselerasjon + LP-fordypning
+//
+// Watch-flagg: reservoar >= 30 + kobling >= 50 + noe trigger-aktivitet
+//              → varsler selv om totalfare er lav (ladd våpen + LP beveger seg)
+//
+// Regime A (IS>1013 + LP<995): full faremodell
+// Regime B (IS<1013, LP>995):  reservoar-monitor kun
+// Regime C (IS<1013, LP<995):  watch kan fortsatt utløses
+
+function beregnFare(is_naa, is_24f, is_72f, isTemp_naa, isTemp_24f, lp_sentroid, ba_naa, lav, gradNaa, gradAksel, gradAkkTimer){
+
+  var isHoyt  = is_naa > IS_REF;
+  var lpAktiv = lp_sentroid < 995;
+  var regimeA = isHoyt && lpAktiv;
+  var regimeC = !isHoyt && lpAktiv;
+  var regime  = regimeA ? 'A' : regimeC ? 'C' : 'B';
+
+  var grad = is_naa - lp_sentroid;
+
+  // ── RESERVOAR (0-100) ─────────────────────────────────────────────────────
+  // Er katabatisk energi lagret på innlandsisen?
+  // Komponenter: IS-amplitude, IS-trend, temperatur-kaldhet
+  var isAmp    = is_naa - IS_REF;                   // positivt=ladd
+  var isTrend24 = is_naa - is_24f;
+  var isTrend72 = is_naa - is_72f;
+
+  // Temperatur-støtte: kaldere is = tyngre luft = sterkere katabatisk potensial
+  var kaldStotte = 0;
+  var isTempTrend24 = null;
+  if(isTemp_naa !== null && isTemp_naa !== undefined){
+    kaldStotte = klamp(-isTemp_naa, 0, 40);          // kaldere gir høyere verdi
+    if(isTemp_24f !== null && isTemp_24f !== undefined){
+      isTempTrend24 = isTemp_naa - isTemp_24f;       // negativ = kjøler seg
+    }
+  }
+  var tempKomp = norm(kaldStotte, 0, 35);
+  var tempTrendKomp = (isTempTrend24 !== null && isTempTrend24 < 0)
+                      ? norm(-isTempTrend24, 0, 8) : 0;
+
+  var reservoar = klamp(100 * (
+    0.40 * norm(isAmp, -15, 15)          // IS-amplitude
+    + 0.20 * norm(isTrend24, -5, 10)     // IS-trend 24t
+    + 0.15 * norm(isTrend72, -8, 15)     // IS-trend 72t (langvarig bygning)
+    + 0.15 * tempKomp                    // kald luft på is
+    + 0.10 * tempTrendKomp               // kjøling av is
+  ), 0, 100);
+
+  // Hvis IS langt under 1013 – cap reservoar (ingen ladning uansett trend)
+  if(isAmp <= -10) reservoar = Math.min(reservoar, 35);
+
+  // ── KOBLING (0-100) ───────────────────────────────────────────────────────
+  // LP i riktig posisjon og retning?
+  var seaLowDepth = Math.max(0, 1000 - lp_sentroid);
+  var kobling = klamp(100 * (
+    0.55 * (lav.sektorScore / 100)       // LP-sektor (W-sektorer best)
+    + 0.30 * norm(seaLowDepth, 5, 30)   // dybde
+    + 0.15 * lav.retningVekt            // bevegelse mot østkysten
+  ), 0, 100);
+
+  // ── TRIGGER (0-100) ───────────────────────────────────────────────────────
+  // Er gradienten aktiv og akselererende?
+  var d6 = gradAksel;
+  var trigger = klamp(100 * (
+    0.40 * norm(grad, 0, 65)
+    + 0.20 * norm(d6 > 0 ? d6 : 0, 0, 10)
+    + 0.20 * norm(Math.max(0, -lav.fordypning), 0, 8)   // LP fordyper seg
+    + 0.20 * norm(gradAkkTimer, 0, 48)
+  ), 0, 100);
+
+  // ── WATCH-FLAGG ───────────────────────────────────────────────────────────
+  // "Våpenet er ladd og LP beveger seg riktig vei"
+  // Utløses selv i Regime B/C hvis reservoaret bygger
+  var watch = (
+    reservoar >= 30 && kobling >= 50 &&
+    (grad >= GM || d6 >= 2 || (-lav.fordypning) >= 2 || gradAkkTimer >= 6)
+  );
+
+  // ── TOTAL FAREPOENG (kun Regime A) ───────────────────────────────────────
+  var baVekt = (ba_naa - is_naa) > BA_FORSTERKNING_TRSKEL ? 1.25 : 1.0;
+  var isTrendVekt = isTrend24 > 3 ? 1.3 : isTrend24 > 0 ? 1.1 : isTrend24 > -3 ? 0.9 : 0.7;
+
+  var base = 0;
+  var gradScore = 0, isScore = 0, lpScore = 0, akScore = 0;
+
+  if(regimeA){
+    gradScore = klamp(
+      grad < GM ? 0 :
+      grad < GF ? (grad-GM)/(GF-GM)*15 :
+      grad < GK ? 15 + (grad-GF)/(GK-GF)*15 :
+                  30 + Math.min(10, (grad-GK)*0.5), 0, 40);
+
+    var isAmplitude = Math.max(0, isAmp);
+    isScore = klamp((isAmplitude/20)*25 * isTrendVekt * baVekt, 0, 25);
+
+    var fordVekt = lav.fordypning < -4 ? 1.4 : lav.fordypning < -2 ? 1.2 :
+                   lav.fordypning < 0 ? 1.0 : lav.fordypning < 2 ? 0.8 : 0.6;
+    var lpLadVekt = lav.lpLadetid >= 36 ? 1.4 : lav.lpLadetid >= 18 ? 1.2 :
+                    lav.lpLadetid >= 6 ? 1.0 : 0.5;
+    var lpIFare = lav.curr && iLFaresone(lav.curr.lat, lav.curr.lon);
+    lpScore = klamp(lpIFare ? 15 * fordVekt * lpLadVekt * lav.retningVekt : 0, 0, 25);
+
+    akScore = klamp(Math.max(0, gradAksel*1.5) + Math.min(5, gradAkkTimer/12), 0, 10);
+
+    base = gradScore + isScore + lpScore + akScore;
+  }
+
+  var total = klamp(base, 0, 100);
+
+  return {
+    total, gradScore, isScore, lpScore, akScore,
+    grad, isAmp, isTrend24, isTrend72,
+    baVekt, isTrendVekt,
+    reservoar, kobling, trigger, watch,
+    kaldStotte, isTempTrend24,
+    fordVekt: lav.fordypning < -4 ? 1.4 : lav.fordypning < -2 ? 1.2 :
+              lav.fordypning < 0 ? 1.0 : lav.fordypning < 2 ? 0.8 : 0.6,
+    lpLadVekt: lav.lpLadetid >= 36 ? 1.4 : lav.lpLadetid >= 18 ? 1.2 :
+               lav.lpLadetid >= 6 ? 1.0 : 0.5,
+    regime, isHoyt, lpAktiv, regimeA, regimeC, seaLowDepth
+  };
+}
+
+// ─── STATUS-FUNKSJONER ────────────────────────────────────────────────────────
+
+function isLadning(is_naa){
+  if(is_naa >= 1013) return ['hi',  'LADD  [■■■]', (is_naa-IS_REF)];
+  if(is_naa >= 1008) return ['mid', 'DELVIS [■■□]', (is_naa-IS_REF)];
+  if(is_naa >= 1003) return ['blu', 'SVAK  [■□□]', (is_naa-IS_REF)];
+  return                    ['ok',  'UTLADD [□□□]', (is_naa-IS_REF)];
+}
+
+function fareNivaa(f){
+  if(f.regimeC && !f.watch) return ['mid', 'LAVTRYKK-REGIME · INGEN PITERAQ-BETINGELSE', 'Lavtrykk over hele omraadet'];
+  if(f.watch && !f.regimeA) return ['mid', '⚠ WATCH · RESERVOAR BYGGER', 'IS lades – LP kobling aktiv – folg med'];
+  if(!f.isHoyt) return ['ok', 'LAV FARE · STATUS NAA', ''];
+  if(f.total >= 60) return ['hi',  'HOY PITERAQ-FARE · STATUS NAA', 'Regime A aktiv'];
+  if(f.total >= 35) return ['mid', 'FORHOYET FARE · STATUS NAA', 'Regime A aktiv'];
+  if(f.total >= 20) return ['blu', 'FOLG MED · STATUS NAA', 'Regime A aktiv'];
+  return                   ['ok',  'LAV FARE · STATUS NAA', ''];
+}
+
+function out(h){document.getElementById('o').innerHTML=h;}
+
+// ─── HENT DATA ────────────────────────────────────────────────────────────────
+
+async function go(){
+  document.getElementById('btn').disabled=true;
+  out('<span class="dim">Henter data...</span>');
+  try{
+    var base='https://api.open-meteo.com/v1/forecast';
+    var pFelles='&hourly=pressure_msl,temperature_2m&timezone=GMT&forecast_days=2&past_days=3';
+    var pBarePress='&hourly=pressure_msl&timezone=GMT&forecast_days=2&past_days=3';
+
+    // Kall 1: IS-punkter (trykk + temperatur)
+    var isLats=IS_PUNKTER.map(function(s){return s.lat;}).join(',');
+    var isLons=IS_PUNKTER.map(function(s){return s.lon;}).join(',');
+    out('<span class="dim">Henter IS-punkter (3 punkt med temp)...</span>');
+    var res1=await fetch(base+'?latitude='+isLats+'&longitude='+isLons+pFelles);
+    if(!res1.ok) throw new Error('IS HTTP '+res1.status);
+    var r1=await res1.json();
+    var isData=Array.isArray(r1)?r1:[r1];
+    if(isData.length<3) throw new Error('Mangler IS-punkt: '+isData.length+'/3');
+
+    // Kall 2: Soner (IL, BA, TA – bare trykk)
+    var soneLats=SONEPUNKTER.map(function(s){return s.lat;}).join(',');
+    var soneLons=SONEPUNKTER.map(function(s){return s.lon;}).join(',');
+    out('<span class="dim">Henter soner (IL/BA/TA)...</span>');
+    var res2=await fetch(base+'?latitude='+soneLats+'&longitude='+soneLons+pBarePress);
+    if(!res2.ok) throw new Error('Soner HTTP '+res2.status);
+    var r2=await res2.json();
+    var soneData=Array.isArray(r2)?r2:[r2];
+    if(soneData.length<3) throw new Error('Mangler soner: '+soneData.length+'/3');
+
+    // Kall 3: Grid (bare trykk)
+    var gLats=GRID.map(function(s){return s.lat;}).join(',');
+    var gLons=GRID.map(function(s){return s.lon;}).join(',');
+    out('<span class="dim">Henter grid ('+GRID.length+' punkt)...</span>');
+    var res3=await fetch(base+'?latitude='+gLats+'&longitude='+gLons+pBarePress);
+    if(!res3.ok) throw new Error('Grid HTTP '+res3.status);
+    var r3=await res3.json();
+    var gridData=Array.isArray(r3)?r3:[r3];
+    if(gridData.length<8) throw new Error('For faa grid-punkt: '+gridData.length);
+
+    vis(isData, soneData, gridData);
+  }catch(e){
+    out('<span class="hi">FEIL: '+e.message+'</span>');
+  }
+  document.getElementById('btn').disabled=false;
+}
+
+// ─── VIS ──────────────────────────────────────────────────────────────────────
+
+function vis(isData, soneData, gridData){
+  var NL=String.fromCharCode(10);
+  var now=new Date();
+  var times=isData[0].hourly.time;
+
+  // IS-data (tre punkter)
+  var pIS_S=isData[0].hourly.pressure_msl;
+  var pIS_M=isData[1].hourly.pressure_msl;
+  var pIS_K=isData[2].hourly.pressure_msl;
+  var tIS_S=isData[0].hourly.temperature_2m;
+  var tIS_M=isData[1].hourly.temperature_2m;
+  var tIS_K=isData[2].hourly.temperature_2m;
+
+  // Soner
+  var pIL=soneData[0].hourly.pressure_msl;
+  var pBA=soneData[1].hourly.pressure_msl;
+  var pTA=soneData[2].hourly.pressure_msl;
+
+  // Grid
+  var gp=gridData.map(function(g){return g.hourly.pressure_msl;});
+
+  var ci   = idxAt(times,now,0);
+  var ci24 = idxAt(times,now,-24);
+  var ci72 = idxAt(times,now,-72);
+
+  // Vektet IS-trykk
+  var is_naa  = isVektet(pIS_S, pIS_M, pIS_K, ci);
+  var is_24f  = isVektet(pIS_S, pIS_M, pIS_K, ci24);
+  var is_72f  = isVektet(pIS_S, pIS_M, pIS_K, ci72);
+
+  // IS-temperatur (vektet, samme vekter)
+  function isTemp(idx){
+    var vals=[tIS_S[idx], tIS_M[idx], tIS_K[idx]];
+    var vekter=[0.40,0.35,0.25];
+    var s=0,w=0;
+    for(var i=0;i<3;i++){
+      if(vals[i]!==null&&vals[i]!==undefined){s+=vals[i]*vekter[i];w+=vekter[i];}
+    }
+    return w>0?s/w:null;
+  }
+  var isTemp_naa = isTemp(ci);
+  var isTemp_24f = isTemp(ci24);
+
+  var ba_naa = pBA[ci];
+  var lav    = sporLav(gp, times, now);
+  var lp_sentroid = lav.curr.pressure;
+
+  var gradAkkTimer = gradAkkumulering(pIS_S, pIS_M, pIS_K, gp, times, now);
+
+  // Gradient-tabell
+  var offsets=[-24,-18,-12,-6,0,6,12,18,24];
+  var idxs=offsets.map(function(o){return idxAt(times,now,o);});
+  var grads=idxs.map(function(idx){
+    var s=sentroidVedIdx(gp,idx);
+    return isVektet(pIS_S,pIS_M,pIS_K,idx) - s.pressure;
+  });
+  var accels=[];
+  for(var i=1;i<grads.length;i++) accels.push(grads[i]-grads[i-1]);
+  var gradNaa=grads[4], gradAksel=accels[3];
+
+  // Fare
+  var f=beregnFare(is_naa, is_24f, is_72f, isTemp_naa, isTemp_24f,
+                   lp_sentroid, ba_naa, lav, gradNaa, gradAksel, gradAkkTimer);
+  var fi=fareNivaa(f);
+
+  // inReach-melding
+  _inreachTekst = lagInreachMelding(f, lav, is_naa, gradNaa, gradAksel, isTemp_naa);
+  var prevDiv=document.getElementById('inreach-preview');
+  prevDiv.textContent=_inreachTekst+NL+'['+_inreachTekst.length+' tegn]';
+  prevDiv.style.display='block';
+  document.getElementById('kopier-btn').style.display='block';
+
+  var o='';
+  o+='<span class="dim">'+now.toUTCString().slice(0,22)+' UTC</span>'+NL+NL;
+
+  // ── Fareboks ───────────────────────────────────────────────────────────────
+  var lad=isLadning(is_naa);
+  var ladAmp=(is_naa-IS_REF)>=0?'+'+(is_naa-IS_REF).toFixed(1):(is_naa-IS_REF).toFixed(1);
+  o+='<span class="'+fi[0]+'"><div class="box">';
+  o+=fi[1]+(fi[2]?NL+fi[2]:'')+NL;
+  o+='IS-ladning: <span class="'+lad[0]+'">'+lad[1]+'</span>  '+is_naa.toFixed(1)+' hPa ('+ladAmp+' fra ref)'+NL;
+  if(isTemp_naa!==null) o+='IS-temp:    '+isTemp_naa.toFixed(1)+'°C'+(f.isTempTrend24!==null?' (24t: '+(f.isTempTrend24>=0?'+':'')+f.isTempTrend24.toFixed(1)+'°C)':'')+NL;
+  o+='Reservoar:  <span class="'+(f.reservoar>=60?'hi':f.reservoar>=30?'mid':f.reservoar>=15?'blu':'ok')+'">'+f.reservoar.toFixed(0)+'/100</span>';
+  o+='  Kobling: <span class="'+(f.kobling>=70?'hi':f.kobling>=50?'mid':f.kobling>=30?'blu':'ok')+'">'+f.kobling.toFixed(0)+'/100</span>'+NL;
+  if(f.watch) o+='<span class="mid">⚠ WATCH: Reservoar+kobling aktiv – LP kan utlose</span>'+NL;
+  o+='Farepoeng:  '+f.total.toFixed(0)+'/100';
+  if(f.total>0) o+='  [grad:'+f.gradScore.toFixed(0)+' is:'+f.isScore.toFixed(0)+' lp:'+f.lpScore.toFixed(0)+' aksel:'+f.akScore.toFixed(0)+']';
+  o+='</div></span>'+NL;
+
+  // ── Diagnose ───────────────────────────────────────────────────────────────
+  o+='[ FARE-DIAGNOSE · INNGANGSVERDIER ]'+NL;
+  o+='─'.repeat(50)+NL;
+
+  var regCls = f.regimeA?'hi':f.regimeC?'mid':'ok';
+  var regTxt = f.regimeA ? 'A – IS-hoeytrykk + LP aktiv  ⚠ Piteraq-betingelse' :
+               f.regimeC ? 'C – Lavtrykk over hele omraadet' :
+                           'B – IS lavtrykk / ingen aktiv LP';
+  o+='Regime:            <span class="'+regCls+'">'+regTxt+'</span>'+NL;
+
+  var isAmpCls = f.isAmp>15?'hi':f.isAmp>5?'mid':f.isAmp>0?'blu':'ok';
+  o+='IS-trykk (vektet): <span class="'+isAmpCls+'">'+is_naa.toFixed(1)+' hPa';
+  o+=' ('+ladAmp+' fra '+IS_REF+' hPa)</span>'+NL;
+  o+='  IS-source:       '+pIS_S[ci].toFixed(1)+' hPa  IS-mid: '+pIS_M[ci].toFixed(1)+' hPa  IS-mouth: '+pIS_K[ci].toFixed(1)+' hPa'+NL;
+
+  var isTrendCls=f.isTrend24>2?'hi':f.isTrend24>0?'mid':f.isTrend24<-2?'ok':'dim';
+  o+='IS-trend 24t:      <span class="'+isTrendCls+'">'+(f.isTrend24>0?'+':'')+f.isTrend24.toFixed(1);
+  o+=' hPa  ('+trendPil(f.isTrend24/6)+')  vekt: ×'+f.isTrendVekt.toFixed(2)+'</span>'+NL;
+
+  var isTrend72Cls=f.isTrend72>5?'hi':f.isTrend72>2?'mid':f.isTrend72<-2?'ok':'dim';
+  o+='IS-trend 72t:      <span class="'+isTrend72Cls+'">'+(f.isTrend72>0?'+':'')+f.isTrend72.toFixed(1)+' hPa</span>'+NL;
+
+  if(isTemp_naa!==null){
+    var tempCls=isTemp_naa<-20?'hi':isTemp_naa<-10?'mid':isTemp_naa<0?'blu':'ok';
+    o+='IS-temperatur:     <span class="'+tempCls+'">'+isTemp_naa.toFixed(1)+'°C  (kald-stoette: '+f.kaldStotte.toFixed(0)+')</span>'+NL;
+    if(f.isTempTrend24!==null){
+      var ttCls=f.isTempTrend24<-3?'hi':f.isTempTrend24<0?'mid':'ok';
+      o+='IS-temp trend 24t: <span class="'+ttCls+'">'+(f.isTempTrend24>=0?'+':'')+f.isTempTrend24.toFixed(1)+'°C  ('+trendPil(f.isTempTrend24/6)+')</span>'+NL;
+    }
+  }
+
+  var baCls=f.baVekt>1?'mid':'dim';
+  o+='Baffin naa:        <span class="'+baCls+'">'+ba_naa.toFixed(1)+' hPa';
+  o+='  BA-IS: '+(ba_naa-is_naa>0?'+':'')+(ba_naa-is_naa).toFixed(1)+' hPa';
+  o+='  forsterkning: ×'+f.baVekt.toFixed(2)+'</span>'+NL;
+
+  var gradCls=f.grad>=GK?'hi':f.grad>=GF?'mid':f.grad>=GM?'blu':'ok';
+  o+='Gradient IS→LP:    <span class="'+gradCls+'">'+(f.grad>0?'+':'')+f.grad.toFixed(1)+' hPa';
+  o+='  (IS '+is_naa.toFixed(1)+' − LP-sentroid '+lp_sentroid.toFixed(1)+')</span>'+NL;
+
+  o+='Grad-akkumulering: <span class="'+(gradAkkTimer>=36?'hi':gradAkkTimer>=18?'mid':'dim')+'">';
+  o+=gradAkkTimer+'t over '+GM+' hPa-terskel</span>'+NL;
+
+  var akCls=gradAksel>3?'hi':gradAksel>1?'mid':gradAksel<-1?'ok':'dim';
+  o+='Grad-akselerasjon: <span class="'+akCls+'">'+(gradAksel>=0?'+':'')+gradAksel.toFixed(1)+' hPa/6t  '+trendPil(gradAksel)+'</span>'+NL;
+
+  var lpPosCls=iLFaresone(lav.curr.lat,lav.curr.lon)?'mid':'ok';
+  o+='LP-sentroid pos:   <span class="'+lpPosCls+'">'+lav.sentroidLat.toFixed(2)+'N / ';
+  o+=Math.abs(lav.sentroidLon).toFixed(2)+'V'+NL;
+  o+='  Sentroid-trykk:  '+lav.senterTrykk.toFixed(1)+' hPa'+NL;
+  o+='  Min-punkt:       '+lav.minTrykk.toFixed(1)+' hPa  @ '+lav.minLat.toFixed(1)+'N/'+Math.abs(lav.minLon).toFixed(1)+'V  ['+lav.minId+']'+NL;
+  o+='  Sektor-score:    '+lav.sektorScore+'/100  Status: '+(iLFaresone(lav.curr.lat,lav.curr.lon)?'■ I FAREPOSISJON':'□ utenfor fareposisjon')+'</span>'+NL;
+
+  var retCls=lav.naermerOst?'hi':'ok';
+  o+='LP-retning:        <span class="'+retCls+'">'+lav.retning;
+  o+=(lav.naermerOst?' → mot ostkysten':' → bort fra ostkysten');
+  o+='  retningsvekt: '+lav.retningVekt.toFixed(2)+'</span>'+NL;
+
+  var fordCls=lav.fordypning<-4?'hi':lav.fordypning<-2?'mid':lav.fordypning>2?'ok':'dim';
+  o+='LP-fordypning:     <span class="'+fordCls+'">'+(lav.fordypning>=0?'+':'')+lav.fordypning.toFixed(1);
+  o+=' hPa/6t'+(lav.fordypning<-2?' ⚠ Fordyper seg':lav.fordypning<0?' Svak fordypning':' Fyller seg')+'</span>'+NL;
+
+  var lpLCls=lav.lpLadetid>=36?'hi':lav.lpLadetid>=18?'mid':lav.lpLadetid>=6?'blu':'ok';
+  o+='LP-ladetid:        <span class="'+lpLCls+'">'+lav.lpLadetid+'t i fareposisjon  vekt: ×'+f.lpLadVekt.toFixed(2)+'</span>'+NL;
+
+  if(lav.exitAdvarsel) o+='<span class="mid">⚠ EXIT: '+lav.exitAdvarsel+'</span>'+NL;
+
+  // ── Score-oversikt ─────────────────────────────────────────────────────────
+  o+=NL+'[ SCORE-OVERSIKT ]'+NL;
+  o+='─'.repeat(50)+NL;
+  var resCls=f.reservoar>=60?'hi':f.reservoar>=30?'mid':f.reservoar>=15?'blu':'ok';
+  var kobCls=f.kobling>=70?'hi':f.kobling>=50?'mid':f.kobling>=30?'blu':'ok';
+  var trigCls=f.trigger>=60?'hi':f.trigger>=35?'mid':f.trigger>=20?'blu':'ok';
+  o+='Reservoar:  <span class="'+resCls+'">'+f.reservoar.toFixed(0)+'/100</span>  (IS-ladning + temperatur-stoette)'+NL;
+  o+='Kobling:    <span class="'+kobCls+'">'+f.kobling.toFixed(0)+'/100</span>  (LP-sektor + dybde + retning)'+NL;
+  o+='Trigger:    <span class="'+trigCls+'">'+f.trigger.toFixed(0)+'/100</span>  (gradient + akselerasjon + fordypning)'+NL;
+  o+='Watch-flagg: '+(f.watch?'<span class="mid">■ AKTIV</span>':'<span class="ok">□ inaktiv</span>')+NL;
+
+  // ── Regime-monitor ─────────────────────────────────────────────────────────
+  o+=NL+'[ REGIME-MONITOR · OVERGANG TIL FARE ]'+NL;
+  o+='─'.repeat(50)+NL;
+  var isAvstand = IS_REF - is_naa;
+  var isTrendPerTime = f.isTrend24 / 24;
+  var isTrendPer6t = f.isTrend24 / 4;
+  var isEtaTxt='–', isEtaCls='dim';
+  if(!f.isHoyt){
+    if(isTrendPerTime > 0.05){
+      var etaTimer = isAvstand / isTrendPerTime;
+      if(etaTimer <= 72){ isEtaTxt='~'+etaTimer.toFixed(0)+'t (hvis trend holder)'; isEtaCls=etaTimer<24?'mid':'blu'; }
+      else { isEtaTxt='>72t eller trend snur'; isEtaCls='dim'; }
+    } else if(isTrendPerTime < -0.05){
+      isEtaTxt='IS faller – beveger seg bort fra Regime A'; isEtaCls='ok';
+    } else {
+      isEtaTxt='IS stabil – ingen overgang ventet'; isEtaCls='dim';
+    }
+  } else { isEtaTxt='IS over 1013 hPa – Regime A mulig'; isEtaCls='hi'; }
+
+  var isAvstandCls = isAvstand > 20?'ok':isAvstand > 10?'dim':isAvstand > 0?'mid':'hi';
+  o+='IS til Regime A:    <span class="'+isAvstandCls+'">';
+  o+=(f.isHoyt?'Over terskel':isAvstand.toFixed(1)+' hPa mangler til 1013')+'</span>'+NL;
+  o+='IS-trend (24t snitt):<span class="'+(isTrendPerTime>0.1?'mid':'dim')+'">';
+  o+=(isTrendPerTime>=0?'+':'')+isTrendPerTime.toFixed(2)+' hPa/t  ';
+  o+=(isTrendPer6t>=0?'+':'')+isTrendPer6t.toFixed(1)+' hPa/6t</span>'+NL;
+  o+='Estimert Regime A:  <span class="'+isEtaCls+'">'+isEtaTxt+'</span>'+NL;
+
+  var lpAvstand = lav.senterTrykk - 995;
+  var lpPosisjonsOk = iLFaresone(lav.curr.lat, lav.curr.lon);
+  var lpTrendTxt, lpTrendCls;
+  if(lav.fordypning<-3){lpTrendTxt='Fordyper seg raskt'; lpTrendCls='mid';}
+  else if(lav.fordypning<0){lpTrendTxt='Svak fordypning'; lpTrendCls='blu';}
+  else {lpTrendTxt='Fyller seg'; lpTrendCls='ok';}
+
+  var lpAvstandCls=lpAvstand>10?'ok':lpAvstand>3?'dim':lpAvstand>0?'mid':'hi';
+  o+='LP til aktiv (995):  <span class="'+lpAvstandCls+'">';
+  o+=(lav.senterTrykk<995?'Under terskel – LP aktiv':lpAvstand.toFixed(1)+' hPa over terskel')+'</span>'+NL;
+  o+='LP-posisjon:        <span class="'+(lpPosisjonsOk?'mid':'ok')+'">';
+  o+=(lpPosisjonsOk?'■ I fareposisjon ('+lav.sentroidLat.toFixed(1)+'N/'+Math.abs(lav.sentroidLon).toFixed(1)+'V)':'□ Utenfor fareposisjon')+'</span>'+NL;
+  o+='LP-trend:           <span class="'+lpTrendCls+'">'+lpTrendTxt+'</span>'+NL;
+
+  var manglerIS=!f.isHoyt, manglerLP=lav.senterTrykk>=995, manglerPos=!lpPosisjonsOk;
+  var antallMangler=(manglerIS?1:0)+(manglerLP?1:0)+(manglerPos?1:0);
+  var sammCls=antallMangler===0?'hi':antallMangler===1?'mid':antallMangler===2?'blu':'ok';
+  var sammTxt=antallMangler===0?'⚠ ALLE BETINGELSER OPPFYLT – Regime A':antallMangler===1?'En betingelse mangler':antallMangler===2?'To betingelser mangler':'Alle betingelser mangler';
+  var manglListe=[];
+  if(manglerIS) manglListe.push('IS-hoeytrykk (naa '+is_naa.toFixed(1)+' hPa, trenger >'+IS_REF+')');
+  if(manglerLP) manglListe.push('LP-dybde (naa '+lav.senterTrykk.toFixed(1)+' hPa, trenger <995)');
+  if(manglerPos) manglListe.push('LP-posisjon (naa utenfor faresoneboks)');
+  o+='Samlet:             <span class="'+sammCls+'">'+sammTxt+'</span>'+NL;
+  manglListe.forEach(function(m){o+='  · <span class="dim">Mangler: '+m+'</span>'+NL;});
+
+  // ── IS-historikk ───────────────────────────────────────────────────────────
+  o+=NL+'[ IS-TRYKK · AMPLITUDE OG TREND ]'+NL;
+  o+='Tid     IS-trykk  Amplitude  Status'+NL;
+  o+='─'.repeat(45)+NL;
+  for(var offset=72;offset>=-6;offset-=6){
+    var idx2=idxAt(times,now,-offset);
+    var p2=isVektet(pIS_S,pIS_M,pIS_K,idx2);
+    var amp=p2-IS_REF;
+    var lbl=offset===0?'  Naa':('-'+offset+'t').padStart(5);
+    var over1018=p2>=1018;
+    var ampCls=amp>15?'hi':amp>5?'mid':amp>0?'blu':'dim';
+    o+='<span class="'+(over1018?'ok':'dim')+'">'+lbl+'  '+p2.toFixed(1).padStart(7)+' hPa</span>';
+    o+='  <span class="'+ampCls+'">'+(amp>=0?'+':'')+amp.toFixed(1).padStart(6)+' hPa  '+(over1018?'■ Over 1018':'□ Pause')+'</span>'+NL;
+  }
+
+  // ── Gradient-tabell ────────────────────────────────────────────────────────
+  o+=NL+'[ GRADIENT IS→LP-SENTROID · 6t INTERVALLER ]'+NL;
+  o+='Tid      Grad    Aksel  Trend'+NL;
+  o+='─'.repeat(46)+NL;
+  o+='<span class="dim">(- historikk  + modell-projeksjon)</span>'+NL;
+  for(var j=0;j<offsets.length;j++){
+    var off=offsets[j], g=grads[j];
+    var a=j>0?accels[j-1]:null;
+    var lbl2=off===0?'  Naa':(off>0?'+':'')+off+'t';
+    var gStr=g.toFixed(1).padStart(7);
+    var aStr=a!==null?(a>=0?'+':'')+a.toFixed(1).padStart(5):'     ';
+    var pil=a!==null?trendPil(a):'';
+    var cls=g>=GK?'hi':g>=GF?'mid':g>=GM?'blu':'ok';
+    var pre=off>0?'<span class="dim">':'';
+    var suf=off>0?'</span>':'';
+    o+=pre+'<span class="'+cls+'">'+lbl2+' '+gStr+' hPa  '+aStr+' hPa  '+pil+'</span>'+(off===0?' ◀':'')+NL+suf;
+  }
+
+  // ── LP-sporing ─────────────────────────────────────────────────────────────
+  o+=NL+'[ LP-SPORING · SENTROID · 72t HISTORIKK ]'+NL;
+  o+='Tid    Sentroid-pos       Sent.trykk  Min.trykk  I fare  Dyp nok'+NL;
+  o+='─'.repeat(68)+NL;
+  lav.spor.filter(function(s){return s.offset%12===0;}).forEach(function(s){
+    var lbl=s.offset===0?'  Naa':(s.offset+'t').padStart(5);
+    var pos=s.lat.toFixed(1)+'N/'+Math.abs(s.lon).toFixed(1)+'V';
+    var fareCls=s.iLFare&&s.dypNok?'hi':s.iLFare?'mid':'dim';
+    o+='<span class="'+fareCls+'">'+lbl+'  '+pos.padEnd(16)+
+       s.pressure.toFixed(1).padStart(7)+' hPa  '+
+       s.minP.toFixed(1).padStart(7)+' hPa  '+
+       (s.iLFare?'■':'□')+'       '+(s.dypNok?'■':'□')+'</span>'+NL;
+  });
+
+  // ── Tasiilaq ───────────────────────────────────────────────────────────────
+  o+=NL+'[ TASIILAQ – FAKTISK STATUS ]'+NL;
+  o+='<span class="dim">► dmi.dk/lokation/show/GL/3424607/Tasiilaq'+NL;
+  o+='► dmi.dk/varsler-gronland</span>'+NL;
+
+  // ── Trykk naa ──────────────────────────────────────────────────────────────
+  o+=NL+'[ TRYKK NAA – ALLE SONER (MSLP) ]'+NL;
+  o+='Innlandsisen (IS)    '+is_naa.toFixed(1).padStart(7)+' hPa  (vektet: source/mid/mouth)'+NL;
+  o+='Island ref.  (IL)    '+pIL[ci].toFixed(1).padStart(7)+' hPa'+NL;
+  o+='Baffin       (BA)    '+pBA[ci].toFixed(1).padStart(7)+' hPa'+NL;
+  o+='Tasiilaq     (TA)    '+pTA[ci].toFixed(1).padStart(7)+' hPa'+NL;
+  o+='LP-sentroid  (DS)    '+lav.senterTrykk.toFixed(1).padStart(7)+' hPa  ('+lav.sentroidLat.toFixed(1)+'N/'+Math.abs(lav.sentroidLon).toFixed(1)+'V)'+NL;
+  o+='LP-min-punkt (DS)    '+lav.minTrykk.toFixed(1).padStart(7)+' hPa  ('+lav.minLat.toFixed(1)+'N/'+Math.abs(lav.minLon).toFixed(1)+'V)'+NL;
+
+  o+=NL+'<span class="dim">v7.0 · IS: 3 punkt (69N/42V, 68.6N/41V, 68.2N/40V) vektet 40/35/25%'+NL;
+  o+='Terskler: GM='+GM+' GF='+GF+' GK='+GK+' hPa · Grid: '+GRID.length+' punkt'+NL;
+  o+='Sentroid: N=5 laveste (1/P) · Watch: reservoar>=30 + kobling>=50 + triggeraktivitet'+NL;
+  o+='Open-Meteo modelldata · IS temp+trykk · Grid bare trykk</span>';
+
+  out(o);
+}
+
+// ─── INREACH-MELDING ──────────────────────────────────────────────────────────
+
+var _inreachTekst = '';
+
+function lagInreachMelding(f, lav, is_naa, gradNaa, gradAksel, isTemp_naa){
+  var NL=String.fromCharCode(10);
+  var now=new Date();
+  var dd=String(now.getUTCDate()).padStart(2,'0');
+  var mm=String(now.getUTCMonth()+1).padStart(2,'0');
+  var hh=String(now.getUTCHours()).padStart(2,'0');
+  var mn=String(now.getUTCMinutes()).padStart(2,'0');
+  var dato=dd+'/'+mm+' '+hh+':'+mn+'UTC';
+  var curr=lav.spor[lav.spor.length-1];
+
+  var fareStr=f.total>=60?'!!! HOY FARE':
+              f.total>=35?'!! FORHOYET':
+              f.total>=20?'! FOLG MED':
+              f.watch?'! WATCH':
+              f.regimeC?'LAVTRYKK-REG':'LAV FARE';
+
+  var isAmp=(is_naa-1013);
+  var isStr='IS:'+is_naa.toFixed(0)+'('+(isAmp>=0?'+':'')+isAmp.toFixed(0)+')';
+  var tempStr=isTemp_naa!==null?'T:'+isTemp_naa.toFixed(0)+'C':'';
+  var lpStr='LP:'+curr.pressure.toFixed(0)+'@'+curr.lat.toFixed(0)+'N/'+Math.abs(curr.lon).toFixed(0)+'V';
+  var gradStr='G:'+(gradNaa>=0?'+':'')+gradNaa.toFixed(0);
+  var akselStr='dG:'+(gradAksel>=0?'+':'')+gradAksel.toFixed(1);
+  var farePos=curr.iLFare?'DS+':'DS-';
+  var resStr='Res:'+f.reservoar.toFixed(0)+' Kob:'+f.kobling.toFixed(0);
+
+  var linje1='PITERAQ '+dato+' '+fareStr;
+  var linje2='Reg:'+f.regime+' '+isStr+' '+tempStr;
+  var linje3=lpStr+' '+farePos+' '+gradStr+' '+akselStr;
+  var linje4=resStr+' Fare:'+f.total+'/100';
+
+  var melding=[linje1,linje2,linje3,linje4].join(NL);
+  if(melding.length>160) melding=melding.slice(0,157)+'...';
+  return melding;
+}
+
+function kopierInreach(){
+  if(!_inreachTekst) return;
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(_inreachTekst).then(function(){
+      var btn=document.getElementById('kopier-btn');
+      btn.textContent='✓ KOPIERT';
+      setTimeout(function(){btn.textContent='📋 KOPIER INREACH-MELDING ( <160 tegn )';},2000);
+    }).catch(function(){
+      prompt('Kopier manuelt:', _inreachTekst);
+    });
+  } else {
+    prompt('Kopier manuelt:', _inreachTekst);
+  }
+}
+
+</script>
+</body>
+</html>
