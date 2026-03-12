@@ -153,7 +153,7 @@ function sentroidVedIdx(gp, idx){
   for(var i=0; i<GRID.length; i++){
     var p=gp[i][idx];
     if(p===null||p===undefined) continue;
-    pts.push({lat:GRID[i].lat, lon:GRID[i].lon, id:GRID[i].id, p:p});
+    pts.push({lat:GRID[i].lat, lon:GRID[i].lon, id:GRID[i].id, arm:GRID[i].arm, p:p});
   }
   if(pts.length===0) return {lat:62,lon:-25,pressure:1013,minP:1013,minLat:62,minLon:-25,minId:'?'};
   pts.sort(function(a,b){return a.p-b.p;});
@@ -295,10 +295,13 @@ function beregnFare(is_naa, is_24f, is_72f, isTemp_naa, isTemp_24f, lp_sentroid,
 
   // ── KOBLING (0-100) ───────────────────────────────────────────────────────
   // LP i riktig posisjon og retning?
-  var seaLowDepth = Math.max(0, 1000 - lp_sentroid);
+  // Dybde gir kun poeng hvis LP faktisk er i fareposisjons-sektoren
+  var seaLowDepth = Math.max(0, IS_REF - lp_sentroid); // hPa under normalt
+  var lpIFaresone = lav.curr && iLFaresone(lav.curr.lat, lav.curr.lon);
+  var dybdeKomp = lpIFaresone ? norm(seaLowDepth, 10, 50) : norm(seaLowDepth, 10, 50) * 0.3;
   var kobling = klamp(100 * (
-    0.55 * (lav.sektorScore / 100)       // LP-sektor (W-sektorer best)
-    + 0.30 * norm(seaLowDepth, 5, 30)   // dybde
+    0.55 * (lav.sektorScore / 100)       // LP-sektor (Arm C best)
+    + 0.30 * dybdeKomp                  // dybde, halvert utenfor fareposisjon
     + 0.15 * lav.retningVekt            // bevegelse mot østkysten
   ), 0, 100);
 
